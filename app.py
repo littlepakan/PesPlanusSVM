@@ -1,304 +1,205 @@
-# -*- coding: utf-8 -*-
-"""
-Wine Classifier Web App - Streamlit
-"""
-
-import streamlit as st
-import pandas as pd
-import numpy as np
-import joblib
 import os
-import matplotlib.pyplot as plt
+import pickle
+import streamlit as st
+import torch
+import torch.nn as nn
+from torchvision import models, transforms
+from torch.utils.data import Dataset, DataLoader
+from PIL import Image
+from sklearn.metrics import classification_report, accuracy_score
+import numpy as np
+import pandas as pd
+import warnings
 
-# ===== ตั้งค่าหน้าเว็บ =====
-st.set_page_config(
-    page_title="🍷 Wine Classifier",
-    page_icon="🍷",
-    layout="wide",
-    initial_sidebar_state="expanded"
+warnings.filterwarnings("ignore")
+
+# ==========================================
+# 1. ตั้งค่าหน้า Streamlit
+# ==========================================
+st.set_page_config(page_title="X-Ray Prediction App", layout="wide")
+st.title("🦴 ระบบวิเคราะห์ภาพ X-Ray (VGG-16 + SVM + RFE)")
+st.markdown("---")
+
+# ==========================================
+# 2. กำหนด Transformation (ต้องเหมือนตอนเทรนเป๊ะ)
+# ==========================================
+data_transforms = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+CLASS_NAMES = {0: "✅ Normal (ปกติ)", 1: "⚠️ Pes Planus (เท้าแบน)"}
+
+# ==========================================
+# 3. โหลดโมเดลแบบ Cache (โหลดครั้งเดียว ประหยัดทรัพยากร)
+# ==========================================
+@st.cache_resource(show_spinner="⏳ กำลังโหลดโมเดล VGG-16 และ SVM...")
+def load_models(fold_name):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # 1. โหลด VGG-16
+    vgg16 = models.vgg16(weights=models.VGG16_Weights.DEFAULT)
+    vgg16.classifier = nn.Sequential(*list(vgg16.classifier.children())[:-1]) # ตัดชั้นสุดท้ายออก
+    vgg16 = vgg16.to(device)
+    vgg16.eval()
+    
+    # 2. โหลด SVM และ RFE Selector
+    svm_path = f"{fold_name}_best_svm.pkl"
+    rfe_path = f"{fold_name}_rfe_selector.pkl"
+    
+    if not os.path.exists(svm_path) or not os.path.exists(rfe_path):
+        st.error(f"❌ ไม่พบไฟล์โมเดล: `{svm_path}` หรือ `{rfe_path}`\nโปรดตรวจสอบว่าไฟล์อยู่ในโฟลเดอร์เดียวกันกับ app.py")
+        st.stop()
+        
+    with open(svm_path, 'rb') as f:
+        svm_clf = pickle.load(f)
+    with open(rfe_path, 'rb') as f:
+        selector = pickle.load(f)
+        
+    return vgg16, svm_clf, selector, device
+
+# ==========================================
+# 4. Sidebar: การตั้งค่า
+# ==========================================
+st.sidebar.header("⚙️ ตั้งค่า")
+fold_choice = st.sidebar.selectbox(
+    "เลือก Fold ของโมเดล:",
+    ['Fold_1', 'Fold_2', 'Fold_3', 'Fold_4', 'Fold_5'],
+    index=0
 )
 
-# ===== Custom CSS สำหรับความสวยงาม =====
-st.markdown("""
-<style>
-    /* พื้นหลังหลัก */
-    .stApp {
-        background: linear-gradient(135deg, #f5f7fa 0%, #e8ecf3 100%);
-    }
-    
-    /* Header */
-    .main-header {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 2rem;
-        border-radius: 15px;
-        color: white;
-        text-align: center;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-        margin-bottom: 2rem;
-    }
-    
-    .main-header h1 {
-        margin: 0;
-        font-size: 2.5rem;
-        font-weight: 700;
-    }
-    
-    .main-header p {
-        margin: 0.5rem 0 0 0;
-        opacity: 0.9;
-        font-size: 1.1rem;
-    }
-    
-    /* Card */
-    .card {
-        background: white;
-        padding: 1.5rem;
-        border-radius: 12px;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-        margin-bottom: 1rem;
-    }
-    
-    /* Prediction Result */
-    .prediction-box {
-        background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
-        padding: 2rem;
-        border-radius: 15px;
-        color: white;
-        text-align: center;
-        margin: 1rem 0;
-    }
-    
-    .prediction-box h2 {
-        margin: 0;
-        font-size: 2rem;
-    }
-    
-    /* Sidebar */
-    [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #2c3e50 0%, #34495e 100%);
-    }
-    
-    [data-testid="stSidebar"] * {
-        color: white !important;
-    }
-    
-    /* Button */
-    .stButton > button {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        border: none;
-        padding: 0.6rem 2rem;
-        border-radius: 8px;
-        font-weight: 600;
-        width: 100%;
-        transition: all 0.3s;
-    }
-    
-    .stButton > button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
-    }
-</style>
-""", unsafe_allow_html=True)
+# โหลดโมเดลทันทีที่เปิดเว็บ
+vgg16, svm_clf, selector, device = load_models(fold_choice)
+st.sidebar.success(f"✅ โหลดโมเดล {fold_choice} สำเร็จ!\nDevice: {device}")
 
+# ==========================================
+# 5. Main UI: แบ่งเป็น 2 Tabs
+# ==========================================
+tab1, tab2 = st.tabs(["📸 ทำนายผลรูปภาพเดี่ยว", "📊 ทดสอบกับชุดข้อมูล (Test Set)"])
 
-# ===== โหลดโมเดล =====
-@st.cache_resource
-def load_model():
-    """โหลดโมเดลและ scaler จากไฟล์"""
-    try:
-        model = joblib.load('model_files/dt_model.pkl')
-        scaler = joblib.load('model_files/scaler.pkl')
-        features = joblib.load('model_files/feature_names.pkl')
-        return model, scaler, features
-    except FileNotFoundError:
-        st.error("❌ ไม่พบไฟล์โมเดล กรุณาวางโฟลเดอร์ 'model_files' ในไดเรกทอรีเดียวกัน")
-        st.stop()
-
-
-model, scaler, features = load_model()
-
-# ชื่อคลาสไวน์
-WINE_NAMES = {
-    0: "🍷 Class 0 - ไวน์ชนิดที่ 1",
-    1: "🍷 Class 1 - ไวน์ชนิดที่ 2",
-    2: "🍷 Class 2 - ไวน์ชนิดที่ 3"
-}
-
-# ===== Sidebar =====
-with st.sidebar:
-    st.markdown("## 🍷 Wine Classifier")
-    st.markdown("---")
-    st.markdown("""
-    **แอปพลิเคชันจำแนกประเภทไวน์**  
-    ใช้โมเดล Decision Tree ในการวิเคราะห์คุณสมบัติทางเคมีของไวน์
-    """)
-    st.markdown("---")
-    st.markdown("### 📊 ข้อมูล")
-    st.markdown("- **Dataset:** Wine Dataset")
-    st.markdown("- **Model:** Decision Tree")
-    st.markdown("- **Features:** 13 คุณสมบัติ")
-    st.markdown("- **Classes:** 3 ประเภท")
-    st.markdown("---")
-    st.markdown("### 🛠️ เทคโนโลยี")
-    st.markdown("- Python 3.x")
-    st.markdown("- scikit-learn")
-    st.markdown("- Streamlit")
-
-
-# ===== Header =====
-st.markdown("""
-<div class="main-header">
-    <h1>🍷 Wine Quality Classifier</h1>
-    <p>ระบบจำแนกประเภทไวน์ด้วย Decision Tree Machine Learning</p>
-</div>
-""", unsafe_allow_html=True)
-
-
-# ===== Input Form =====
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    st.markdown("### 🔬 ป้อนข้อมูลคุณสมบัติทางเคมี")
+# ------------------------------------------
+# TAB 1: ทำนายผลรูปภาพเดี่ยว (Upload)
+# ------------------------------------------
+with tab1:
+    st.subheader("อัปโหลดภาพ X-Ray เพื่อวิเคราะห์")
+    uploaded_file = st.file_uploader("เลือกไฟล์รูปภาพ (.jpg, .png)", type=['jpg', 'jpeg', 'png', 'bmp'])
     
-    # สร้าง input fields สำหรับแต่ละ feature
-    input_data = {}
-    
-    # แบ่ง features เป็น 2 คอลัมน์
-    half = len(features) // 2 + 1
-    left_features = features[:half]
-    right_features = features[half:]
-    
-    col_left, col_right = st.columns(2)
-    
-    # ค่าขอบเขตสำหรับแต่ละ feature (จากข้อมูล Wine)
-    feature_ranges = {
-        'alcohol': (10.0, 15.0, 12.5),
-        'malic_acid': (0.5, 5.0, 2.5),
-        'ash': (1.3, 3.5, 2.3),
-        'alcalinity_of_ash': (10.0, 30.0, 19.0),
-        'magnesium': (70.0, 160.0, 100.0),
-        'total_phenols': (0.8, 4.0, 2.3),
-        'flavanoids': (0.2, 5.0, 2.0),
-        'nonflavanoid_phenols': (0.1, 1.0, 0.4),
-        'proanthocyanins': (0.4, 4.0, 1.6),
-        'color_intensity': (1.5, 17.0, 5.0),
-        'hue': (0.3, 1.7, 0.95),
-        'od280/od315_of_diluted_wines': (1.2, 4.0, 2.6),
-        'proline': (250.0, 1700.0, 750.0)
-    }
-    
-    with col_left:
-        for feat in left_features:
-            min_v, max_v, default = feature_ranges.get(feat, (0, 10, 5))
-            input_data[feat] = st.number_input(
-                feat.replace('_', ' ').title(),
-                min_value=float(min_v),
-                max_value=float(max_v),
-                value=float(default),
-                step=0.1
-            )
-    
-    with col_right:
-        for feat in right_features:
-            min_v, max_v, default = feature_ranges.get(feat, (0, 10, 5))
-            input_data[feat] = st.number_input(
-                feat.replace('_', ' ').title(),
-                min_value=float(min_v),
-                max_value=float(max_v),
-                value=float(default),
-                step=0.1
-            )
-    
-    # ปุ่มทำนาย
-    st.markdown("<br>", unsafe_allow_html=True)
-    predict_button = st.button("🔮 ทำนายผล", use_container_width=True)
-
-
-with col2:
-    st.markdown("### 📋 ข้อมูลที่ป้อน")
-    
-    # แสดงข้อมูลที่ป้อนในรูปแบบ DataFrame
-    input_df = pd.DataFrame([input_data])
-    st.dataframe(input_df.T.rename(columns={0: 'ค่า'}), use_container_width=True)
-    
-    # ปุ่ม Reset
-    if st.button("🔄 รีเซ็ตค่า", use_container_width=True):
-        st.rerun()
-
-
-# ===== Prediction =====
-if predict_button:
-    with st.spinner("🤖 กำลังวิเคราะห์ข้อมูล..."):
-        # Transform ข้อมูลด้วย scaler เดียวกันกับตอนฝึก
-        input_array = np.array([list(input_data.values())])
-        input_scaled = scaler.transform(input_array)
+    if uploaded_file is not None:
+        # แสดงรูปภาพ
+        image = Image.open(uploaded_file).convert('RGB')
+        col1, col2 = st.columns([1, 1])
         
-        # ทำนาย
-        prediction = model.predict(input_scaled)[0]
-        probabilities = model.predict_proba(input_scaled)[0]
-        
-        st.markdown("---")
-        
-        # แสดงผลการทำนาย
-        st.markdown(f"""
-        <div class="prediction-box">
-            <h2>{WINE_NAMES[prediction]}</h2>
-            <p style="margin-top: 0.5rem; font-size: 1.2rem;">
-                ความมั่นใจ: {probabilities[prediction]*100:.2f}%
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # แสดงความน่าจะเป็นของแต่ละคลาส
-        st.markdown("### 📊 ความน่าจะเป็นของแต่ละคลาส")
-        
-        prob_df = pd.DataFrame({
-            'คลาส': [WINE_NAMES[i] for i in range(3)],
-            'ความน่าจะเป็น (%)': [p * 100 for p in probabilities]
-        })
-        
-        col_a, col_b = st.columns([1, 2])
-        
-        with col_a:
-            st.dataframe(prob_df, use_container_width=True, hide_index=True)
-        
-        with col_b:
-            # Bar chart แสดงความน่าจะเป็น
-            chart_df = pd.DataFrame(
-                probabilities * 100,
-                index=['Class 0', 'Class 1', 'Class 2'],
-                columns=['ความน่าจะเป็น (%)']
-            )
-            st.bar_chart(chart_df, color='#667eea')
-        
-        # Feature Importance
-        st.markdown("---")
-        st.markdown("### 🎯 Feature Importance")
-        
-        importance_df = pd.DataFrame({
-            'Feature': features,
-            'Importance': model.feature_importances_
-        }).sort_values('Importance', ascending=True)
-        
-        # กรองเฉพาะ features ที่มี importance > 0
-        importance_df = importance_df[importance_df['Importance'] > 0]
-        
-        if len(importance_df) > 0:
-            fig, ax = plt.subplots(figsize=(10, 6))
-            ax.barh(importance_df['Feature'], importance_df['Importance'], 
-                    color='#667eea', edgecolor='white')
-            ax.set_xlabel('Importance')
-            ax.set_title('Feature Importance จากโมเดล Decision Tree')
-            st.pyplot(fig)
+        with col1:
+            st.image(image, caption="รูปภาพที่อัปโหลด", use_column_width=True)
+            
+        with col2:
+            with st.spinner("🧠 กำลังวิเคราะห์รูปภาพ..."):
+                # 1. Preprocess
+                img_tensor = data_transforms(image).unsqueeze(0).to(device)
+                
+                # 2. Extract Features (VGG-16)
+                with torch.no_grad():
+                    features = vgg16(img_tensor).cpu().numpy()
+                
+                # 3. Feature Selection (RFE)
+                features_reduced = selector.transform(features)
+                
+                # 4. Predict (SVM)
+                prediction = svm_clf.predict(features_reduced)[0]
+                
+                # แสดงผล
+                st.markdown("### ผลการวิเคราะห์:")
+                result_text = CLASS_NAMES.get(prediction, f"ไม่ทราบค่า ({prediction})")
+                
+                if prediction == 0:
+                    st.success(result_text)
+                else:
+                    st.error(result_text)
+                    
+                # (Optional) แสดง Confidence Score จาก Decision Function
+                decision_score = svm_clf.decision_function(features_reduced)[0]
+                st.caption(f"Decision Score: {decision_score:.4f} (ยิ่งห่างจาก 0 ยิ่งมั่นใจ)")
+
+# ------------------------------------------
+# TAB 2: ทดสอบกับชุดข้อมูล (เหมือนโค้ดเดิม)
+# ------------------------------------------
+with tab2:
+    st.subheader("ประเมินผลโมเดลกับชุดข้อมูล Test")
+    
+    # ฟังก์ชันช่วยสร้าง Label Map (ย่อส่วนมาจากโค้ดเดิม)
+    def get_label_map(root_dir):
+        label_dict = {}
+        for root, _, files in os.walk(root_dir):
+            for file in files:
+                if file.lower().endswith('.csv'):
+                    try:
+                        df = pd.read_csv(os.path.join(root, file))
+                        if 'img_name' in df.columns and 'label' in df.columns:
+                            for _, row in df.iterrows():
+                                base_name = str(row['img_name']).replace('.png', '').replace('.jpg', '')
+                                label_dict[base_name] = int(row['label'])
+                    except Exception:
+                        pass
+        return label_dict
+
+    base_dir = st.text_input("Path ของโฟลเดอร์โปรเจกต์:", value=".")
+    
+    if st.button("🚀 เริ่มประเมินผล"):
+        if not os.path.exists(base_dir):
+            st.error("ไม่พบโฟลเดอร์ที่ระบุ")
         else:
-            st.info("โมเดลไม่ได้ใช้ features ใดๆ ในการตัดสินใจ")
+            with st.spinner("กำลังสแกน CSV และเตรียมข้อมูล..."):
+                label_map = get_label_map(base_dir)
+                
+            # สร้าง Dataset Class (ย่อส่วน)
+            class SimpleXRayDataset(Dataset):
+                def __init__(self, root_dir, label_dict, transform=None):
+                    self.transform = transform
+                    self.image_paths = []
+                    self.labels = []
+                    valid_exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff')
+                    if os.path.exists(root_dir):
+                        for root, _, files in os.walk(root_dir):
+                            for file in files:
+                                if file.lower().endswith(valid_exts):
+                                    base_name = os.path.splitext(file)[0]
+                                    if base_name in label_dict:
+                                        self.image_paths.append(os.path.join(root, file))
+                                        self.labels.append(label_dict[base_name])
+                def __len__(self): return len(self.image_paths)
+                def __getitem__(self, idx):
+                    image = Image.open(self.image_paths[idx]).convert('RGB')
+                    if self.transform: image = self.transform(image)
+                    return image, self.labels[idx]
 
-
-# ===== Footer =====
-st.markdown("---")
-st.markdown("""
-<div style='text-align: center; color: #666; padding: 1rem;'>
-    <p>🎓 พัฒนาเพื่อการศึกษา | Decision Tree Classifier with Streamlit</p>
-</div>
-""", unsafe_allow_html=True)
+            test_dir = os.path.join(base_dir, 'global_test')
+            test_ds = SimpleXRayDataset(test_dir, label_map, transform=data_transforms)
+            
+            st.info(f"พบรูปภาพใน Test Set ที่ตรงกับ CSV: **{len(test_ds)}** รูป")
+            
+            if len(test_ds) > 0:
+                with st.spinner("กำลังสกัด Feature และทำนายผล..."):
+                    loader = DataLoader(test_ds, batch_size=32, shuffle=False)
+                    all_preds = []
+                    all_labels = []
+                    
+                    with torch.no_grad():
+                        for images, labels in loader:
+                            feats = vgg16(images.to(device)).cpu().numpy()
+                            feats_red = selector.transform(feats)
+                            preds = svm_clf.predict(feats_red)
+                            all_preds.extend(preds)
+                            all_labels.extend(labels.numpy())
+                    
+                    # คำนวณผล
+                    acc = accuracy_score(all_labels, all_preds)
+                    report = classification_report(all_labels, all_preds, target_names=['Normal', 'PesPlanus'], output_dict=True, zero_division=0)
+                    report_df = pd.DataFrame(report).transpose()
+                    
+                    st.markdown("### 📊 ผลการประเมิน")
+                    col1, col2 = st.columns(2)
+                    col1.metric("Accuracy", f"{acc * 100:.2f}%")
+                    col2.dataframe(report_df.style.format("{:.4f}"), use_container_width=True)
+            else:
+                st.warning("ไม่พบรูปภาพในโฟลเดอร์ `global_test` ที่ตรงกับไฟล์ CSV")
