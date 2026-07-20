@@ -41,23 +41,19 @@ def load_svm_model():
 model = load_svm_model()
 
 # --- Image Preprocessing & Feature Extraction ---
-def process_xray(image, target_features=44):
+def process_xray(image, target_features=300):
     """
-    Converts PIL image to grayscale, resizes, and extracts flattened feature vectors.
-    Adjusted to match the exact input dimensions expected by your compiled SVM.
+    Converts PIL image to grayscale and resizes to match the exact 300 features 
+    expected by your trained SVM model.
     """
-    # Convert PIL Image to OpenCV Format
-    img_array = np.array(image.convert('L')) # Grayscale
+    # Convert PIL Image to Grayscale numpy array
+    img_array = np.array(image.convert('L'))
     
-    # Simple feature fallback alignment strategy for demo architecture
-    if target_features == 44:
-        resized = cv2.resize(img_array, (11, 4)) # 11x4 = 44 feature dimensions
-        flattened = resized.flatten().astype(np.float64)
-    else:
-        resized = cv2.resize(img_array, (64, 64))
-        flattened = resized.flatten().astype(np.float64)
+    # 10 x 30 pixels = 300 total flattened features to match ffsvm.pkl
+    resized = cv2.resize(img_array, (30, 10)) 
+    flattened = resized.flatten().astype(np.float64)
         
-    # Standard normal scaling simulation
+    # Standard normal scaling
     flattened_scaled = (flattened - np.mean(flattened)) / (np.std(flattened) + 1e-7)
     
     return np.array([flattened_scaled])
@@ -84,11 +80,11 @@ if uploaded_file is not None:
             st.warning("Prediction unavailable: Model configuration missing.")
         else:
             # Check features expected by your unpickled SVC model
-            expected_features = getattr(model, "n_features_in_", 44)
+            expected_features = getattr(model, "n_features_in_", 300)
             
             with st.spinner("Processing structural features..."):
                 try:
-                    # Extract features from the image
+                    # Extract features matching the model layout
                     features = process_xray(image, target_features=expected_features)
                     
                     # Make Prediction
