@@ -17,7 +17,7 @@ warnings.filterwarnings("ignore")
 # 1. ตั้งค่าหน้า Streamlit
 # ==========================================
 st.set_page_config(page_title="X-Ray Prediction App", layout="wide")
-st.title("🦴 ระบบวิเคราะห์ภาพ X-Ray (VGG-16 + SVM + RFE)")
+st.title("🦴 ระบบวิเคราะห์ภาพ X-Ray (VGG-16 + Final SVM)")
 st.markdown("---")
 
 # ==========================================
@@ -32,10 +32,10 @@ data_transforms = transforms.Compose([
 CLASS_NAMES = {0: "✅ Normal (ปกติ)", 1: "⚠️ Pes Planus (เท้าแบน)"}
 
 # ==========================================
-# 3. โหลดโมเดลแบบ Cache (โหลดครั้งเดียว ประหยัดทรัพยากร)
+# 3. โหลดโมเดลแบบ Cache (VGG-16 และ ffsvm.pkl)
 # ==========================================
 @st.cache_resource(show_spinner="⏳ กำลังโหลดโมเดล VGG-16 และ SVM...")
-def load_models(fold_name):
+def load_models():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # 1. โหลด VGG-16
@@ -44,37 +44,24 @@ def load_models(fold_name):
     vgg16 = vgg16.to(device)
     vgg16.eval()
     
-    # 2. โหลด SVM และ RFE Selector
-    svm_path = f"{fold_name}_best_svm.pkl"
-    rfe_path = f"{fold_name}_rfe_selector.pkl"
+    # 2. โหลด SVM ที่คุณเตรียมไว้ (ffsvm.pkl)
+    svm_path = "ffsvm.pkl"
     
-    if not os.path.exists(svm_path) or not os.path.exists(rfe_path):
-        st.error(f"❌ ไม่พบไฟล์โมเดล: `{svm_path}` หรือ `{rfe_path}`\nโปรดตรวจสอบว่าไฟล์อยู่ในโฟลเดอร์เดียวกันกับ app.py")
+    if not os.path.exists(svm_path):
+        st.error(f"❌ ไม่พบไฟล์โมเดล: `{svm_path}`\nโปรดตรวจสอบว่าไฟล์อยู่ในโฟลเดอร์เดียวกันกับ app.py")
         st.stop()
         
     with open(svm_path, 'rb') as f:
         svm_clf = pickle.load(f)
-    with open(rfe_path, 'rb') as f:
-        selector = pickle.load(f)
         
-    return vgg16, svm_clf, selector, device
-
-# ==========================================
-# 4. Sidebar: การตั้งค่า
-# ==========================================
-st.sidebar.header("⚙️ ตั้งค่า")
-fold_choice = st.sidebar.selectbox(
-    "เลือก Fold ของโมเดล:",
-    ['Fold_1', 'Fold_2', 'Fold_3', 'Fold_4', 'Fold_5'],
-    index=0
-)
+    return vgg16, svm_clf, device
 
 # โหลดโมเดลทันทีที่เปิดเว็บ
-vgg16, svm_clf, selector, device = load_models(fold_choice)
-st.sidebar.success(f"✅ โหลดโมเดล {fold_choice} สำเร็จ!\nDevice: {device}")
+vgg16, svm_clf, device = load_models()
+st.sidebar.success(f"✅ โหลดโมเดล `ffsvm.pkl` สำเร็จ!\nDevice: {device}")
 
 # ==========================================
-# 5. Main UI: แบ่งเป็น 2 Tabs
+# 4. Main UI: แบ่งเป็น 2 Tabs
 # ==========================================
 tab1, tab2 = st.tabs(["📸 ทำนายผลรูปภาพเดี่ยว", "📊 ทดสอบกับชุดข้อมูล (Test Set)"])
 
@@ -102,11 +89,14 @@ with tab1:
                 with torch.no_grad():
                     features = vgg16(img_tensor).cpu().numpy()
                 
-                # 3. Feature Selection (RFE)
-                features_reduced = selector.transform(features)
+                # ตรวจสอบ Input ป้องกัน Error จากโมเดล
+                expected_features = getattr(svm_clf, "n_features_in_", 4096)
+                if expected_features < 4096:
+                    st.error(f"⚠️ โมเดล `ffsvm.pkl` ต้องการฟีเจอร์จำนวน {expected_features} ตัว (อาจจำเป็นต้องใช้ RFE Selector ร่วมด้วย)")
+                    st.stop()
                 
-                # 4. Predict (SVM)
-                prediction = svm_clf.predict(features_reduced)[0]
+                # 3. Predict (SVM)
+                prediction = svm_clf.predict(features)[0]
                 
                 # แสดงผล
                 st.markdown("### ผลการวิเคราะห์:")
@@ -118,16 +108,17 @@ with tab1:
                     st.error(result_text)
                     
                 # (Optional) แสดง Confidence Score จาก Decision Function
-                decision_score = svm_clf.decision_function(features_reduced)[0]
-                st.caption(f"Decision Score: {decision_score:.4f} (ยิ่งห่างจาก 0 ยิ่งมั่นใจ)")
+                if hasattr(svm_clf, "decision_function"):
+                    decision_score = svm_clf.decision_function(features)[0]
+                    st.caption(f"Decision Score: {decision_score:.4f} (ยิ่งห่างจาก 0 ยิ่งมั่นใจ)")
 
 # ------------------------------------------
-# TAB 2: ทดสอบกับชุดข้อมูล (เหมือนโค้ดเดิม)
+# TAB 2: ทดสอบกับชุดข้อมูล
 # ------------------------------------------
 with tab2:
     st.subheader("ประเมินผลโมเดลกับชุดข้อมูล Test")
     
-    # ฟังก์ชันช่วยสร้าง Label Map (ย่อส่วนมาจากโค้ดเดิม)
+    # ฟังก์ชันช่วยสร้าง Label Map
     def get_label_map(root_dir):
         label_dict = {}
         for root, _, files in os.walk(root_dir):
@@ -152,7 +143,6 @@ with tab2:
             with st.spinner("กำลังสแกน CSV และเตรียมข้อมูล..."):
                 label_map = get_label_map(base_dir)
                 
-            # สร้าง Dataset Class (ย่อส่วน)
             class SimpleXRayDataset(Dataset):
                 def __init__(self, root_dir, label_dict, transform=None):
                     self.transform = transform
@@ -184,22 +174,26 @@ with tab2:
                     all_preds = []
                     all_labels = []
                     
+                    expected_features = getattr(svm_clf, "n_features_in_", 4096)
+                    if expected_features < 4096:
+                        st.error(f"⚠️ โมเดล SVM ต้องการ Input {expected_features} ตัว ไม่สามารถประเมินผลด้วยข้อมูล 4,096 ฟีเจอร์ได้โดยตรง")
+                        st.stop()
+
                     with torch.no_grad():
                         for images, labels in loader:
                             feats = vgg16(images.to(device)).cpu().numpy()
-                            feats_red = selector.transform(feats)
-                            preds = svm_clf.predict(feats_red)
+                            preds = svm_clf.predict(feats)
                             all_preds.extend(preds)
                             all_labels.extend(labels.numpy())
-                    
-                    # คำนวณผล
-                    acc = accuracy_score(all_labels, all_preds)
-                    report = classification_report(all_labels, all_preds, target_names=['Normal', 'PesPlanus'], output_dict=True, zero_division=0)
-                    report_df = pd.DataFrame(report).transpose()
-                    
-                    st.markdown("### 📊 ผลการประเมิน")
-                    col1, col2 = st.columns(2)
-                    col1.metric("Accuracy", f"{acc * 100:.2f}%")
-                    col2.dataframe(report_df.style.format("{:.4f}"), use_container_width=True)
+                
+                # คำนวณผล
+                acc = accuracy_score(all_labels, all_preds)
+                report = classification_report(all_labels, all_preds, target_names=['Normal', 'PesPlanus'], output_dict=True, zero_division=0)
+                report_df = pd.DataFrame(report).transpose()
+                
+                st.markdown("### 📊 ผลการประเมิน")
+                col1, col2 = st.columns(2)
+                col1.metric("Accuracy", f"{acc * 100:.2f}%")
+                col2.dataframe(report_df.style.format("{:.4f}"), use_container_width=True)
             else:
                 st.warning("ไม่พบรูปภาพในโฟลเดอร์ `global_test` ที่ตรงกับไฟล์ CSV")
