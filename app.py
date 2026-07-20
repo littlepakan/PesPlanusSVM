@@ -90,9 +90,6 @@ if uploaded_file is not None:
                     # Make Prediction
                     prediction = model.predict(features)[0]
                     
-                    # Get Decision Function Score or Probabilities if available
-                    has_prob = getattr(model, "probability", False)
-                    
                     st.markdown("### **Results:**")
                     
                     # Mapping predictions based on structural class codes
@@ -101,13 +98,12 @@ if uploaded_file is not None:
                     else:
                         st.success("✅ **Normal Foot Alignment**")
                         
-                    # Statistical Context Output
-                    if has_prob:
-                        probs = model.predict_proba(features)[0]
-                        st.info(f"Confidence Level: {max(probs) * 100:.2f}%")
-                    else:
+                    # Safely handle decision boundary score instead of probabilities
+                    try:
                         score = model.decision_function(features)[0]
                         st.text(f"SVM Boundary Distance Score: {score:.4f}")
+                    except Exception:
+                        pass
                         
                 except Exception as e:
                     st.error(f"Feature Dimension Mismatch error: {e}")
