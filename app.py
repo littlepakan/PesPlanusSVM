@@ -98,7 +98,7 @@ if uploaded_file is not None:
                     else:
                         st.success("✅ **Normal Foot Alignment**")
                         
-                    # Safely handle decision boundary score instead of probabilities
+                    # Safely handle decision boundary score
                     try:
                         score = model.decision_function(features)[0]
                         st.text(f"SVM Boundary Distance Score: {score:.4f}")
