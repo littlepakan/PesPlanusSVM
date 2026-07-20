@@ -29,7 +29,7 @@ st.markdown("""
 # --- Model Loader ---
 @st.cache_resource
 def load_svm_model():
-    model_path = "gld_svm_model.pkl"
+    model_path = "ffsvm.pkl"
     if os.path.exists(model_path):
         with open(model_path, 'rb') as f:
             model = pickle.load(f)
@@ -43,23 +43,21 @@ model = load_svm_model()
 # --- Image Preprocessing & Feature Extraction ---
 def process_xray(image, target_features=44):
     """
-    Converts PIL image to grayscale, resizes, and extracts flat flattened feature vectors.
+    Converts PIL image to grayscale, resizes, and extracts flattened feature vectors.
     Adjusted to match the exact input dimensions expected by your compiled SVM.
     """
     # Convert PIL Image to OpenCV Format
     img_array = np.array(image.convert('L')) # Grayscale
     
     # Simple feature fallback alignment strategy for demo architecture
-    # If the model uses geometric features (GLCM, shapes), replace this block with your feature extractor.
     if target_features == 44:
-        # Resizing dynamically down to match geometric/statistical arrays if necessary
         resized = cv2.resize(img_array, (11, 4)) # 11x4 = 44 feature dimensions
         flattened = resized.flatten().astype(np.float64)
     else:
         resized = cv2.resize(img_array, (64, 64))
         flattened = resized.flatten().astype(np.float64)
         
-    # Standard normal Scaling simulation (or adjust based on your training pipeline)
+    # Standard normal scaling simulation
     flattened_scaled = (flattened - np.mean(flattened)) / (np.std(flattened) + 1e-7)
     
     return np.array([flattened_scaled])
